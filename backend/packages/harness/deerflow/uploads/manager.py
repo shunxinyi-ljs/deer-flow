@@ -42,6 +42,19 @@ UPLOAD_STAGING_MIN_AGE = timedelta(hours=24)
 
 _MAX_FILENAME_BYTES = 255
 
+# Archive extensions made of several parts. ``Path.suffix`` only peels the last
+# one, so these are split as a unit and the ``_N`` counter goes before them:
+# ``report.tar.gz`` dedupes to ``report_1.tar.gz``, not ``report.tar_1.gz``.
+_COMPOUND_SUFFIXES = (
+    ".tar.bz2",
+    ".tar.lzma",
+    ".tar.lzo",
+    ".tar.zst",
+    ".tar.gz",
+    ".tar.lz",
+    ".tar.xz",
+)
+
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
@@ -99,10 +112,24 @@ def _fit_utf8_bytes(text: str, budget: int) -> str:
     return encoded[:budget].decode("utf-8", errors="ignore")
 
 
+def _split_stem_suffix(name: str) -> tuple[str, str]:
+    """Split *name* into stem and suffix, keeping a known compound suffix whole."""
+    folded = name.casefold()
+    for suffix in _COMPOUND_SUFFIXES:
+        if len(name) > len(suffix) and folded.endswith(suffix):
+            return name[: -len(suffix)], name[-len(suffix) :]
+    path = Path(name)
+    return path.stem, path.suffix
+
+
 def claim_unique_filename(name: str, seen: set[str]) -> str:
     """Generate a case-insensitively unique filename by appending ``_N`` on collision.
 
     Automatically adds the returned name to *seen* so callers don't need to.
+
+    The ``_N`` counter goes before the whole extension, and a known compound
+    archive suffix stays together: ``report.tar.gz`` becomes
+    ``report_1.tar.gz``.
 
     The deduplicated name stays within the 255-byte filename limit that
     :func:`normalize_filename` enforces: when appending ``_N`` (plus the
@@ -122,7 +149,7 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
     if name.casefold() not in claimed:
         seen.add(name)
         return name
-    stem, suffix = Path(name).stem, Path(name).suffix
+    stem, suffix = _split_stem_suffix(name)
     counter = 1
     while True:
         tag = f"_{counter}"

@@ -150,6 +150,19 @@ class TestDeduplicateFilename:
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
         assert "data_1.txt" in seen
 
+    def test_compound_suffix_keeps_every_extension_at_the_end(self):
+        seen = {"report.tar.gz"}
+        assert claim_unique_filename("report.tar.gz", seen) == "report_1.tar.gz"
+        assert "report_1.tar.gz" in seen
+
+    def test_compound_suffix_walks_past_claimed_counters(self):
+        seen = {"report.tar.gz", "report_1.tar.gz"}
+        assert claim_unique_filename("report.tar.gz", seen) == "report_2.tar.gz"
+
+    def test_compound_suffix_is_compared_case_insensitively(self):
+        seen = {"Report.TAR.GZ"}
+        assert claim_unique_filename("report.tar.gz", seen) == "report_1.tar.gz"
+
     def test_case_insensitive_collision_including_suffix(self):
         seen = {"Report.txt", "report_1.TXT"}
         assert claim_unique_filename("report.txt", seen) == "report_2.txt"
@@ -199,6 +212,14 @@ class TestDeduplicateFilename:
     def test_short_names_keep_existing_dedupe_shape(self):
         seen = {"data.txt"}
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
+
+    def test_max_length_compound_suffix_stays_within_filename_limit(self):
+        name = "a" * 246 + ".tar.gz"
+        seen = {name}
+        deduped = claim_unique_filename(name, seen)
+        assert deduped == "a" * 246 + "_1.tar.gz"
+        assert len(deduped.encode("utf-8")) <= 255
+        assert normalize_filename(deduped) == deduped
 
 
 # ---------------------------------------------------------------------------

@@ -555,6 +555,34 @@ def test_delete_thread_route_cleans_persisted_records(tmp_path):
     feedback_repo.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
 
 
+def test_delete_thread_route_evicts_in_memory_run_records(tmp_path):
+    """A deleted thread must stop serving runs from this worker's registry.
+
+    ``RunManager.list_by_thread`` merges the durable store with the in-memory
+    registry, so deleting the durable rows alone leaves the deleted thread's
+    runs (including the original prompt in ``kwargs``) readable until restart.
+    """
+    from deerflow.runtime import RunManager, RunStatus
+
+    paths = Paths(tmp_path)
+    app = make_authed_test_app()
+    manager = RunManager()
+    app.state.run_manager = manager
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            record = client.portal.call(manager.create, "thread-evict")
+            client.portal.call(manager.set_status, record.run_id, RunStatus.interrupted)
+            assert len(client.portal.call(manager.list_by_thread, "thread-evict")) == 1
+
+            response = client.delete("/api/threads/thread-evict")
+
+            assert response.status_code == 200
+            assert client.portal.call(manager.list_by_thread, "thread-evict") == []
+            assert client.portal.call(manager.get, record.run_id) is None
+
+
 def test_delete_thread_route_isolates_failing_persistence_cleanup(tmp_path):
     """One failing store must not stop the remaining cleanup attempts."""
     paths = Paths(tmp_path)

@@ -2537,6 +2537,25 @@ class RunManager:
         async with self._thread_registry_lock(thread_id):
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
+    async def forget_thread(self, thread_id: str) -> int:
+        """Drop this worker's in-memory run records for *thread_id*.
+
+        Used after the durable rows of a deleted thread are removed:
+        ``get()`` / ``list_by_thread()`` merge the local registry with the
+        store, so a surviving local record keeps serving the deleted thread's
+        runs (and their prompts in ``kwargs``) until the worker restarts.
+
+        Only ``operation_kind == run`` records are dropped, mirroring the
+        store-side delete: a non-run record is the durable thread-operation
+        reservation that protects the caller.
+        """
+        async with self._thread_registry_lock(thread_id):
+            run_ids = [run_id for run_id in self._runs_by_thread.get(thread_id, {}) if (record := self._runs.get(run_id)) is not None and record.operation_kind == ThreadOperationKind.run]
+            for run_id in run_ids:
+                self._runs.pop(run_id, None)
+                self._unindex_run_locked(run_id, thread_id)
+            return len(run_ids)
+
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay.
 

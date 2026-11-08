@@ -846,6 +846,17 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     except Exception:
         logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
 
+    # Drop this worker's in-memory mirror as well (best-effort). Reads merge the
+    # registry with the store, so a surviving local record keeps serving the
+    # deleted thread's runs — including their original prompts in ``kwargs`` —
+    # through GET /threads/{id}/runs until the worker restarts.
+    try:
+        forget_thread = getattr(get_run_manager(request), "forget_thread", None)
+        if forget_thread is not None:
+            await forget_thread(thread_id)
+    except Exception:
+        logger.debug("Could not evict in-memory run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove persisted run events (best-effort). These are the user-visible
     # conversation history, not a cache: leaving them behind makes a deleted
     # thread's feed readable again through GET /threads/{id}/messages. A legacy

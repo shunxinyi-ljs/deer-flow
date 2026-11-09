@@ -1911,7 +1911,34 @@ export async function stopThreadAndInvalidateCaches(
   }
 }
 
-function getStreamErrorMessage(error: unknown): string {
+/**
+ * Message shown when a stream or send fails.
+ *
+ * The SDK surfaces non-2xx responses as ``HTTPError``, whose message is
+ * ``HTTP <status>: <raw response body>``. For 5xx responses that body is both
+ * unreadable and internal, so callers pass a friendly builder that wins over
+ * the SDK text while still including the status code. 4xx messages are kept
+ * because their detail is usually the actionable part (e.g. a 409 conflict),
+ * and non-HTTP errors are unchanged.
+ */
+export function getStreamErrorMessage(
+  error: unknown,
+  serverUnavailableMessage?: (status: number) => string,
+): string {
+  const message = rawStreamErrorMessage(error);
+  const status = getHttpStatus(error) ?? httpStatusFromMessage(message);
+  if (
+    serverUnavailableMessage &&
+    status !== undefined &&
+    status >= 500 &&
+    status < 600
+  ) {
+    return serverUnavailableMessage(status);
+  }
+  return message;
+}
+
+function rawStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
   }
@@ -1932,6 +1959,15 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
+}
+
+/**
+ * ``HTTPError`` carries the status in a field, but a message-only copy (a
+ * re-thrown or serialized error) still starts with ``HTTP <status>:``.
+ */
+function httpStatusFromMessage(message: string): number | undefined {
+  const matched = /^HTTP (\d{3})\b/.exec(message);
+  return matched ? Number(matched[1]) : undefined;
 }
 
 async function readResponseErrorMessage(
@@ -2342,7 +2378,9 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      toast.error(
+        getStreamErrorMessage(error, t.conversation.serverUnavailable),
+      );
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -3141,7 +3179,9 @@ export function useThreadStream({
             removeSetItems(current, preparedSupersededMessageIds),
           );
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(
+          getStreamErrorMessage(error, t.conversation.serverUnavailable),
+        );
         return false;
       } finally {
         sendInFlightRef.current = false;
@@ -3153,6 +3193,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       queryClient,
+      t,
       thread,
       visibleHistory,
     ],

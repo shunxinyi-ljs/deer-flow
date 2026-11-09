@@ -115,6 +115,11 @@ export default function ChatPage() {
   // the moment the user submits so the UI animates immediately, even though
   // `isNewThread` stays true until the backend actually creates the thread.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
+  // A first send that never became a run hands its text back here.
+  const [failedSendDraft, setFailedSendDraft] = useState<{
+    text: string;
+    token: number;
+  } | null>(null);
   const queryClient = useQueryClient();
   const [settings, setSettings] = useThreadSettings(threadId);
   const modelControl = useModelControl(
@@ -236,6 +241,14 @@ export default function ChatPage() {
       history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
       setThreadId(createdThreadId);
       setIsNewThread(false);
+    },
+    onSendFailed: ({ text }) => {
+      // Rejected before the run existed: welcome layout back, text restored.
+      setIsWelcomeMode(true);
+      setFailedSendDraft((previous) => ({
+        text,
+        token: (previous?.token ?? 0) + 1,
+      }));
     },
     onFinish: (state) => {
       // A run in this thread ended (a send, or a joined scheduled run) while
@@ -814,6 +827,7 @@ export default function ChatPage() {
                         )}
                         isWelcomeMode={isWelcomeMode}
                         threadId={threadId}
+                        restoreDraft={failedSendDraft}
                         projectId={projectParam ?? affiliatedProjectId}
                         draftThreadId={isNewThread ? "new" : threadId}
                         knowledgeScopeControl={

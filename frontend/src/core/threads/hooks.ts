@@ -117,6 +117,11 @@ export type ThreadStreamOptions = {
   isMock?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
+  /**
+   * A first send that failed before its run existed. `thread.submit` still
+   * resolves then (see `onSent`), so this is the only signal the UI gets.
+   */
+  onSendFailed?: (info: { threadId: string; text: string }) => void;
   onFinish?: (state: AgentThreadState) => void;
   /** REST detail fallback for reloads and other tabs; live uses thread.interrupt. */
   restInterrupts?: unknown;
@@ -2069,6 +2074,7 @@ export function useThreadStream({
   isMock,
   onSend,
   onStart,
+  onSendFailed,
   onFinish,
   restInterrupts,
   restInterruptsLoading = false,
@@ -2098,6 +2104,11 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+  // The first send of a conversation this client has not confirmed yet. A
+  // rejected run surfaces later in `onError`; `onCreated` clears this.
+  const pendingFirstSendRef = useRef<{ threadId: string; text: string } | null>(
+    null,
+  );
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
@@ -2105,6 +2116,7 @@ export function useThreadStream({
   const listeners = useRef({
     onSend,
     onStart,
+    onSendFailed,
     onFinish,
   });
   const [answeredApprovalState, setAnsweredApprovalState] = useState<{
@@ -2172,8 +2184,8 @@ export function useThreadStream({
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onSend, onStart, onFinish };
-  }, [onSend, onStart, onFinish]);
+    listeners.current = { onSend, onStart, onSendFailed, onFinish };
+  }, [onSend, onStart, onSendFailed, onFinish]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -2235,6 +2247,8 @@ export function useThreadStream({
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
     }
+    // The run exists, so its thread is no longer an empty leftover.
+    pendingFirstSendRef.current = null;
     setOnStreamThreadId(_threadId);
   }, []);
 
@@ -2314,6 +2328,16 @@ export function useThreadStream({
       }
     },
     [],
+  );
+
+  // Recover a first send that never became a run; clears the pending turn.
+  const failFirstSend = useCallback(
+    (threadId: string, text: string) => {
+      pendingFirstSendRef.current = null;
+      void removeThreadIfEmpty(getAPIClient(isMock), threadId);
+      listeners.current.onSendFailed?.({ threadId, text });
+    },
+    [isMock],
   );
 
   const thread = useStream<AgentThreadState>({
@@ -2521,6 +2545,13 @@ export function useThreadStream({
           ? current
           : { threadId: current.threadId, requestIds };
       });
+      // A first send that never became a run leaves the SDK-created thread
+      // empty. `startedRef` is set only by `onCreated`, so a run that did
+      // start is never rolled back.
+      const failedFirstSend = pendingFirstSendRef.current;
+      if (failedFirstSend && !startedRef.current) {
+        failFirstSend(failedFirstSend.threadId, failedFirstSend.text);
+      }
       scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
@@ -3001,6 +3032,9 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
+      // A send into a conversation this hook does not know yet creates it.
+      const isFirstSend = onStreamThreadId === null;
+
       const text = message.text.trim();
 
       // Capture the current human message count before showing optimistic
@@ -3157,6 +3191,12 @@ export function useThreadStream({
             : undefined,
         });
         options?.onSent?.();
+        if (isFirstSend) {
+          // The SDK resolves this submit as soon as the stream is queued and
+          // reports a rejected run through `onError`, so remember the turn
+          // until `onCreated` proves the run exists.
+          pendingFirstSendRef.current = { threadId, text };
+        }
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
@@ -3195,6 +3235,15 @@ export function useThreadStream({
         setLiveMessagesThreadId(null);
         setIsUploading(false);
         localTurnAnchorRef.current = null;
+        // A submit that rejects before the stream is queued (for example a
+        // failed thread create) reaches this catch instead of `onError`.
+        if (
+          isFirstSend &&
+          pendingFirstSendRef.current?.threadId === threadId &&
+          !startedRef.current
+        ) {
+          failFirstSend(threadId, text);
+        }
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -3209,6 +3258,8 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       visibleHistory,
+      failFirstSend,
+      onStreamThreadId,
     ],
   );
 
@@ -4453,6 +4504,25 @@ async function deleteThreadEverywhere(
     if (getHttpStatus(error) !== 404) throw error;
   }
   await deleteLocalThreadData(threadId);
+}
+
+// Delete a thread only when it provably holds no messages. A thread created
+// ahead of a run that never started has no checkpoint, so the gateway answers
+// 404 for its state — the empty case. Anything else leaves it alone.
+async function removeThreadIfEmpty(
+  apiClient: ThreadDeleteClient & {
+    threads: { getState: (id: string) => Promise<{ values?: unknown }> };
+  },
+  threadId: string,
+) {
+  const messages = await apiClient.threads
+    .getState(threadId)
+    .then(
+      (state) => (state.values as { messages?: unknown } | undefined)?.messages,
+    )
+    .catch((error) => (getHttpStatus(error) === 404 ? [] : undefined));
+  if (!Array.isArray(messages) || messages.length > 0) return;
+  await deleteThreadEverywhere(apiClient, threadId).catch(() => undefined);
 }
 
 export async function findSidecarThreadIdsForParent(

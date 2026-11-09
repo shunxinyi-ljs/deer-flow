@@ -340,6 +340,7 @@ export function InputBox({
   defaultModelName,
   knowledgeScopeControl,
   initialValue,
+  restoreDraft,
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
@@ -387,6 +388,8 @@ export function InputBox({
   /** Optional knowledge-scope control rendered directly after mode. */
   knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
+  /** Text recovered from a first send that never became a run. */
+  restoreDraft?: { text: string; token: number } | null;
   onContextChange?: (
     // Explicit selections contain only the fields changed by that action,
     // never the whole thread-resolved context (which may override the account).
@@ -1129,6 +1132,21 @@ export function InputBox({
     textInput.value,
   ]);
 
+  // A first send that never reached the run still retired its draft on
+  // dispatch: put the text back and let the effect below persist it again.
+  const restoredDraftTokenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!restoreDraft || restoredDraftTokenRef.current === restoreDraft.token) {
+      return;
+    }
+    restoredDraftTokenRef.current = restoreDraft.token;
+    acceptedDraftRef.current = null;
+    pendingDraftSubmissionRef.current = null;
+    latestDraftRef.current = null;
+    invalidateDraftSaveTimer();
+    setTextInput(restoreDraft.text);
+  }, [restoreDraft, invalidateDraftSaveTimer, setTextInput]);
+
   useEffect(() => {
     if (hydratedDraftKey !== draftKey) {
       return;
@@ -1587,7 +1605,21 @@ export function InputBox({
           );
         },
       };
-      const submit = () => onSubmit?.(message, submitOptions);
+      const submit = () => {
+        const result = onSubmit?.(message, submitOptions);
+        if (!(result instanceof Promise)) {
+          return result;
+        }
+        // A rejected submit never started a run: keep the text as a draft.
+        return result.catch((error: unknown) => {
+          writeComposerDraft(getSessionComposerDraftStorage(), draftKey, {
+            text: textInput.value,
+            skillName: null,
+            conversationReferences,
+          });
+          throw error;
+        });
+      };
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
